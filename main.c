@@ -1,14 +1,17 @@
 #include "F28x_Project.h"
+#include <stdio.h>
 
 // define macros
 #define ACQPS_SETTING 9u
 #define ADC_WARMUP_TIME 1000
-#define DAC_MAX_VALUE 1364u
+#define DAC_MAX_VALUE 4096u
+#define DAC_OFFSET_VALUE 2048u
 #define DAC_WARMUP_TIME 10
 #define DT 1.0
 #define KP 1.0
 #define KI 0.0
 #define KD 0.0
+#define MIN(X, Y) (((X) < (Y)) ? (X) : (Y))
 #define NUM_INPUTS_PER_OUTPUT 2
 #define NUM_OUTPUTS 1
 #define HOLD_OUTPUT_GPIO_PIN 89
@@ -183,20 +186,18 @@ void pid_loop(int16 errors[NUM_OUTPUTS],
 		errors[i] = analog_ins[i][1] - analog_ins[i][0];
 		integrals[i] += errors[i] * DT;
 		derivatives[i] = (errors[i] - previous_errors[i]) / DT;
-		analog_outs[i] = -KP * errors[i] - KI * integrals[i] - KD * derivatives[i] + (DAC_MAX_VALUE + 1) / 2;
-		if (analog_outs[i] > DAC_MAX_VALUE)
-			analog_outs[i] = DAC_MAX_VALUE;
+		analog_outs[i] = MIN(KP * errors[i] + KI * integrals[i] + KD * derivatives[i] + DAC_OFFSET_VALUE, DAC_MAX_VALUE - 1);
 		previous_errors[i] = errors[i];
 	}
+	// printf("%d %d \n", errors[0], integrals[0]);
 
 	// output on the DACs if the hold signal is off
 	if (GPIO_ReadPin(HOLD_OUTPUT_GPIO_PIN) == 0) {
-		DacaRegs.DACVALS.bit.DACVALS = analog_outs[0]; //Adcsoc0 // adcina2 //
-		DacbRegs.DACVALS.bit.DACVALS = analog_outs[0]; //adcsoc1 // adcina3
+		DacaRegs.DACVALS.bit.DACVALS = DAC_OFFSET_VALUE; //Adcsoc0 // adcina2 //
+		DacbRegs.DACVALS.bit.DACVALS = analog_outs[0];
+		DaccRegs.DACVALS.bit.DACVALS = MIN(errors[0] + DAC_OFFSET_VALUE, DAC_MAX_VALUE - 1);
 	}
 
-	// output the error signal
-	DaccRegs.DACVALS.bit.DACVALS = errors[0];
 
 	// turn on LED if locked
 	if (errors[0] < LED_THRESHOLD)
