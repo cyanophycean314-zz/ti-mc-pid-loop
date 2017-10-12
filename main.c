@@ -18,76 +18,13 @@
 #define LED_GPIO_PIN 90
 #define LED_THRESHOLD 205
 
-// declare array holding ADC values and store this in ramgs0 for use in DMA
-#pragma DATA_SECTION(analog_ins, "ramgs0");
-Uint16 analog_ins[NUM_OUTPUTS][NUM_INPUTS_PER_OUTPUT];
-
-// declare variable holding gains
-#pragma DATA_SECTION(kp, "ramsg0");
-Uint16 kp;
-
-// declare array holding DAC values
-Uint16 analog_outs[NUM_OUTPUTS];
-
-// move this code to RAM
-#pragma CODE_SECTION(dma_ch1_int_isr, ".TI.ramfunc");
-__interrupt void dma_ch1_int_isr(void)
-{
-	// acknowledge that the interrupt was received
-	EALLOW;
-	PieCtrlRegs.PIEACK.bit.ACK1 = PIEACK_GROUP7;
-	EDIS;
-}
-
-// move this code to RAM
-#pragma CODE_SECTION(dma_ch2_int_isr, ".TI.ramfunc");
-__interrupt void dma_ch2_int_isr(void)
-{
-	// acknowledge that the interrupt was received
-	EALLOW;
-	PieCtrlRegs.PIEACK.bit.ACK2 = PIEACK_GROUP7;
-	EDIS;
-}
-
-// move this code to RAM
-#pragma CODE_SECTION(dma_ch3_int_isr, ".TI.ramfunc");
-__interrupt void dma_ch3_int_isr(void)
-{
-	// acknowledge that the interrupt was received
-	EALLOW;
-	PieCtrlRegs.PIEACK.bit.ACK3 = PIEACK_GROUP7;
-	EDIS;
-}
-
-// move this code to RAM
-#pragma CODE_SECTION(dma_ch4_int_isr, ".TI.ramfunc");
-__interrupt void dma_ch4_int_isr(void)
-{
-	// acknowledge that the interrupt was received
-	EALLOW;
-	PieCtrlRegs.PIEACK.bit.ACK4 = PIEACK_GROUP7;
-	EDIS;
-}
-
-// move this code to RAM
-#pragma CODE_SECTION(dma_ch5_int_isr, ".TI.ramfunc");
-__interrupt void dma_ch5_int_isr(void)
-{
-	// acknowledge that the interrupt was received
-	EALLOW;
-	PieCtrlRegs.PIEACK.bit.ACK5 = PIEACK_GROUP7;
-	EDIS;
-}
-
-// move this code to RAM
-#pragma CODE_SECTION(dma_ch6_int_isr, ".TI.ramfunc");
-__interrupt void dma_ch6_int_isr(void)
-{
-	// acknowledge that the interrupt was received
-	EALLOW;
-	PieCtrlRegs.PIEACK.bit.ACK6 = PIEACK_GROUP7;
-	EDIS;
-}
+// declare PID arrays
+int16 errors[NUM_OUTPUTS];
+int16 integrals[NUM_OUTPUTS];
+int16 derivatives[NUM_OUTPUTS];
+int16 previous_errors[NUM_OUTPUTS];
+int16 analog_ins[NUM_OUTPUTS][NUM_INPUTS_PER_OUTPUT];
+int16 analog_outs[NUM_OUTPUTS];
 
 void configure_adcs(void)
 {
@@ -124,8 +61,8 @@ void setup_adc_channels(void)
 	EALLOW;
 
 	// set channels
-	AdcaRegs.ADCSOC0CTL.bit.CHSEL = 2; //adcin a2
-	AdcaRegs.ADCSOC1CTL.bit.CHSEL = 3; //adcin a3
+	AdcaRegs.ADCSOC0CTL.bit.CHSEL = 2; //socket 0 = adcin a2
+	AdcaRegs.ADCSOC1CTL.bit.CHSEL = 3; //socket 1 = adcin a3
 	AdcaRegs.ADCSOC2CTL.bit.CHSEL = 4; //adcin a4
 	AdcaRegs.ADCSOC3CTL.bit.CHSEL = 5; //adcin a5
 	AdcbRegs.ADCSOC0CTL.bit.CHSEL = 2; //adcin b2
@@ -214,65 +151,23 @@ void configure_dacs(void)
 	EDIS;
 }
 
-void configure_dma(void)
+void reset_arrays(void)
 {
-	// disconnect CLA and connect DMA
-	EALLOW;
-	CpuSysRegs.SECMSEL.bit.PF1SEL = 1;
-	EDIS;
-
-	// initialize DMA
-	DMAInitialize();
-
-	// setup DMA channel one
-	DMACH1AddrConfig((volatile Uint16 *)(&analog_ins[0][0]), (volatile Uint16 *)(&AdcaResultRegs.ADCRESULT0));
-
-	// send one 16 bit word in a burst
-	DMACH1BurstConfig(1, 0, 0);
-
-	// send one burst per transfer
-	DMACH1TransferConfig(1, 0, 0);
-
-	// configure DMA channel one
-	DMACH1ModeConfig(1, PERINT_ENABLE, ONESHOT_DISABLE, CONT_ENABLE,
-					 SYNC_DISABLE, SYNC_SRC, OVRFLOW_DISABLE, SIXTEEN_BIT,
-					 CHINT_END, CHINT_ENABLE);
-
-	// setup DMA channel two
-	DMACH2AddrConfig((volatile Uint16 *)(&analog_ins[0][1]), (volatile Uint16 *)(&AdcaResultRegs.ADCRESULT1));
-
-	// send one 16 bit word in a burst
-	DMACH2BurstConfig(1, 0, 0);
-
-	// send one burst per transfer
-	DMACH2TransferConfig(1, 0, 0);
-
-	// configure DMA channel two
-	DMACH2ModeConfig(2, PERINT_ENABLE, ONESHOT_DISABLE, CONT_ENABLE,
-					 SYNC_DISABLE, SYNC_SRC, OVRFLOW_DISABLE, SIXTEEN_BIT,
-					 CHINT_END, CHINT_ENABLE);
-
-	// setup DMA channel three
-	DMACH3AddrConfig((volatile Uint16 *)(&kp), (volatile Uint16 *)(&AdcaResultRegs.ADCRESULT2));
-
-	// send one 16 bit word in a burst
-	DMACH3BurstConfig(1, 0, 0);
-
-	// send one burst per transfer
-	DMACH3TransferConfig(1, 0, 0);
-
-	// configure DMA channel three
-	DMACH3ModeConfig(3, PERINT_ENABLE, ONESHOT_DISABLE, CONT_ENABLE,
-					 SYNC_DISABLE, SYNC_SRC, OVRFLOW_DISABLE, SIXTEEN_BIT,
-					 CHINT_END, CHINT_ENABLE);
+	// zero all arrays
+	size_t i, j;
+	for (i = 0; i < NUM_OUTPUTS; i++) {
+		for (j = 0; j < NUM_INPUTS_PER_OUTPUT; j++) {
+			analog_ins[i][j] = 0;
+		}
+		analog_outs[i] = 0;
+		errors[i] = 0;
+		integrals[i] = 0;
+		derivatives[i] = 0;
+		previous_errors[i] = 0;
+	}
 }
 
-// move this code to RAM
-#pragma CODE_SECTION(pid_loop, ".TI.ramfunc");
-void pid_loop(int16 errors[NUM_OUTPUTS],
-			  int16 integrals[NUM_OUTPUTS],
-			  int16 derivatives[NUM_OUTPUTS],
-			  int16 previous_errors[NUM_OUTPUTS])
+void pid_loop(void)
 {
 	// start the ADC SOCs
 	AdcaRegs.ADCSOCFRC1.bit.SOC0 = 1;
@@ -284,11 +179,11 @@ void pid_loop(int16 errors[NUM_OUTPUTS],
 	AdcbRegs.ADCSOCFRC1.bit.SOC2 = 1;
 	AdcbRegs.ADCSOCFRC1.bit.SOC3 = 1;
 
-	// perform negative PID on all outputs
+	// perform PID on all outputs
 	size_t i;
 	long pout;
 	for (i = 0; i < NUM_OUTPUTS; i++) {
-		errors[i] = analog_ins[i][1] - analog_ins[i][0];
+		errors[i] = AdcaResultRegs.ADCRESULT1 - AdcaResultRegs.ADCRESULT0;
 		integrals[i] += errors[i] * DT;
 		derivatives[i] = (errors[i] - previous_errors[i]) / DT;
 		pout = (long) errors[i] * AdcaResultRegs.ADCRESULT2 / 3000;
@@ -307,20 +202,11 @@ void pid_loop(int16 errors[NUM_OUTPUTS],
 	}
 
 	// turn on LED if locked
-	if (errors[0] < LED_THRESHOLD)
-		GPIO_WritePin(LED_GPIO_PIN, 0);
-	else
-		GPIO_WritePin(LED_GPIO_PIN, 1);
+	GPIO_WritePin(LED_GPIO_PIN, errors[0] < LED_THRESHOLD);
 }
 
 int main(void)
 {
-	// declare PID arrays
-	int16 errors[NUM_OUTPUTS];
-	int16 integrals[NUM_OUTPUTS];
-	int16 derivatives[NUM_OUTPUTS];
-	int16 previous_errors[NUM_OUTPUTS];
-
 	// initialize system control
 	InitSysCtrl();
 
@@ -349,30 +235,11 @@ int main(void)
 	// enable the PIE block
 	PieCtrlRegs.PIECTRL.bit.ENPIE = 1;
 
-	// enable DMA interrupts
-	PieCtrlRegs.PIEIER7.bit.INTx1 = 1;
-	PieCtrlRegs.PIEIER7.bit.INTx2 = 1;
-	PieCtrlRegs.PIEIER7.bit.INTx3 = 1;
-	PieCtrlRegs.PIEIER7.bit.INTx4 = 1;
-	PieCtrlRegs.PIEIER7.bit.INTx5 = 1;
-	PieCtrlRegs.PIEIER7.bit.INTx6 = 1;
-	IER = M_INT7;
-
 	// enable global interrupts
 	EINT;
 
 	// enable real time debug interrupts
 	ERTM;
-
-	// map DMA interrupts to functions
-	EALLOW;
-	PieVectTable.DMA_CH1_INT= &dma_ch1_int_isr;
-	PieVectTable.DMA_CH2_INT= &dma_ch2_int_isr;
-	PieVectTable.DMA_CH3_INT= &dma_ch3_int_isr;
-	PieVectTable.DMA_CH4_INT= &dma_ch4_int_isr;
-	PieVectTable.DMA_CH5_INT= &dma_ch5_int_isr;
-	PieVectTable.DMA_CH6_INT= &dma_ch6_int_isr;
-	EDIS;
 
 	// copy the necessary code from flash memory to RAM
 	memcpy(&RamfuncsRunStart, &RamfuncsLoadStart, (size_t)(&RamfuncsLoadSize));
@@ -390,31 +257,12 @@ int main(void)
 	// configure the DACs
 	configure_dacs();
 
-	// configure DMA
-	configure_dma();
-
-	// zero all arrays
-	size_t i;
-	size_t j;
-	for (i = 0; i < NUM_OUTPUTS; i++) {
-		for (j = 0; j < NUM_INPUTS_PER_OUTPUT; j++)
-			analog_ins[i][j] = 0;
-
-		analog_outs[i] = 0;
-		errors[i] = 0;
-		integrals[i] = 0;
-		derivatives[i] = 0;
-		previous_errors[i] = 0;
-	}
-
-	// start the DMA channels
-	StartDMACH1();
-	StartDMACH2();
-	StartDMACH3();
+	// zero the arrays
+	reset_arrays();
 
 	while (1) {
 		// run the PID loop
-        pid_loop(errors, integrals, derivatives, previous_errors);
+        pid_loop();
 
 		// delay for a time DT
 		DELAY_US(DT);
