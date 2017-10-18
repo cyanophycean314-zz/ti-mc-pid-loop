@@ -3,6 +3,7 @@
 
 // define macros
 #define ACQPS_SETTING 9u
+#define ADC_SCALE_FACTOR 3000
 #define ADC_WARMUP_TIME 1000
 #define DAC_MAX_VALUE 4096u
 #define DAC_OFFSET_VALUE 2048u
@@ -181,24 +182,25 @@ void pid_loop(void)
 
 	// perform PID on all outputs
 	size_t i;
-	long pout;
+	long pout, dout, iout;
 	for (i = 0; i < NUM_OUTPUTS; i++) {
+		// Calculate error
 		errors[i] = AdcaResultRegs.ADCRESULT1 - AdcaResultRegs.ADCRESULT0;
 		integrals[i] += errors[i] * DT;
 		derivatives[i] = (errors[i] - previous_errors[i]) / DT;
-		pout = (long) errors[i] * AdcaResultRegs.ADCRESULT2 / 3000;
-		// printf("%d\n", pout);
-		analog_outs[i] = MIN(pout + KI * integrals[i] + KD * derivatives[i] + DAC_OFFSET_VALUE, DAC_MAX_VALUE - 1);
+
+		// Scale outputs with ADC inputted constants
+		pout = (long) errors[i] * AdcaResultRegs.ADCRESULT2 / ADC_SCALE_FACTOR;
+		dout = (long) derivatives[i] * AdcaResultRegs.ADCRESULT3 / ADC_SCALE_FACTOR;
+		iout = (long) integrals[i] * AdcbResultRegs.ADCRESULT1 / ADC_SCALE_FACTOR;
 		previous_errors[i] = errors[i];
 	}
-	// printf("%d %d %d\n", analog_ins[0][0], kp, AdcaResultRegs.ADCRESULT2);
-	// printf("%d %d\n", errors[0], AdcaResultRegs.ADCRESULT2);
 
 	// output on the DACs if the hold signal is off
 	if (GPIO_ReadPin(HOLD_OUTPUT_GPIO_PIN) == 0) {
-		DacaRegs.DACVALS.bit.DACVALS = DAC_OFFSET_VALUE; //Adcsoc0 // adcina2 //
-		DacbRegs.DACVALS.bit.DACVALS = pout;
-		DaccRegs.DACVALS.bit.DACVALS = errors[0];
+		DacaRegs.DACVALS.bit.DACVALS = DAC_OFFSET_VALUE;
+		DacbRegs.DACVALS.bit.DACVALS = MIN(DAC_OFFSET_VALUE + pout + dout + iout, DAC_MAX_VALUE - 1);
+		DaccRegs.DACVALS.bit.DACVALS = MIN(DAC_OFFSET_VALUE + errors[i], DAC_MAX_VALUE - 1);
 	}
 
 	// turn on LED if locked
