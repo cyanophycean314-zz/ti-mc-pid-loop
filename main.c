@@ -3,20 +3,23 @@
 
 // define macros
 #define ACQPS_SETTING 9u
-#define ADC_SCALE_FACTOR 3000
+#define ADC_SCALE_FACTOR 45
 #define ADC_WARMUP_TIME 1000
-#define DAC_MAX_VALUE 4096u
-#define DAC_OFFSET_VALUE 2048u
+#define DAC_MAX_VALUE 4096
+#define DAC_OFFSET_VALUE 2048
 #define DAC_WARMUP_TIME 10
 #define DT 1.0
 #define KP 1.0
 #define KI 0.0
 #define KD 0.0
 #define MIN(X, Y) (((X) < (Y)) ? (X) : (Y))
+#define MAX(X, Y) (((X) > (Y)) ? (X) : (Y))
 #define NUM_INPUTS_PER_OUTPUT 2
 #define NUM_OUTPUTS 1
-#define HOLD_OUTPUT_GPIO_PIN 89
-#define LED_GPIO_PIN 90
+#define PID_OUTPUT_GPIO_PIN 89
+#define MANUAL_SET_OUTPUT_GPIO_PIN 90
+#define LED_GREEN_GPIO_PIN 65
+#define LED_RED_GPIO_PIN 69
 #define LED_THRESHOLD 205
 
 // declare PID arrays
@@ -24,6 +27,7 @@ int16 errors[NUM_OUTPUTS];
 int16 integrals[NUM_OUTPUTS];
 int16 derivatives[NUM_OUTPUTS];
 int16 previous_errors[NUM_OUTPUTS];
+int16 previous_outputs[NUM_OUTPUTS];
 int16 analog_ins[NUM_OUTPUTS][NUM_INPUTS_PER_OUTPUT];
 int16 analog_outs[NUM_OUTPUTS];
 
@@ -123,6 +127,7 @@ void setup_adc_channels(void)
 
 	// disallow writing to protected registers
 	EDIS;
+
 }
 
 void configure_dacs(void)
@@ -152,6 +157,21 @@ void configure_dacs(void)
 	EDIS;
 }
 
+void setup_gpio(void) {
+	// System set up GPIO
+	InitGpio();
+	// Set up multiplexer options
+	GPIO_SetupPinMux(PID_OUTPUT_GPIO_PIN, GPIO_MUX_CPU1, 0);
+	GPIO_SetupPinMux(MANUAL_SET_OUTPUT_GPIO_PIN, GPIO_MUX_CPU1, 0);
+	GPIO_SetupPinMux(LED_RED_GPIO_PIN, GPIO_MUX_CPU1, 0);
+	GPIO_SetupPinMux(LED_GREEN_GPIO_PIN, GPIO_MUX_CPU1, 0);
+	// Set up pin options
+	GPIO_SetupPinOptions(PID_OUTPUT_GPIO_PIN, GPIO_INPUT, GPIO_PULLUP);
+	GPIO_SetupPinOptions(MANUAL_SET_OUTPUT_GPIO_PIN, GPIO_INPUT, GPIO_PULLUP);
+	GPIO_SetupPinOptions(LED_RED_GPIO_PIN, GPIO_OUTPUT, GPIO_PUSHPULL);
+	GPIO_SetupPinOptions(LED_GREEN_GPIO_PIN, GPIO_OUTPUT, GPIO_PUSHPULL);
+}
+
 void reset_arrays(void)
 {
 	// zero all arrays
@@ -165,6 +185,7 @@ void reset_arrays(void)
 		integrals[i] = 0;
 		derivatives[i] = 0;
 		previous_errors[i] = 0;
+		previous_outputs[i] = 0;
 	}
 }
 
@@ -175,36 +196,43 @@ void pid_loop(void)
 	AdcaRegs.ADCSOCFRC1.bit.SOC1 = 1;
 	AdcaRegs.ADCSOCFRC1.bit.SOC2 = 1;
 	AdcaRegs.ADCSOCFRC1.bit.SOC3 = 1;
-	AdcbRegs.ADCSOCFRC1.bit.SOC0 = 1;
+//	AdcbRegs.ADCSOCFRC1.bit.SOC0 = 1;
 	AdcbRegs.ADCSOCFRC1.bit.SOC1 = 1;
-	AdcbRegs.ADCSOCFRC1.bit.SOC2 = 1;
-	AdcbRegs.ADCSOCFRC1.bit.SOC3 = 1;
-
+//	AdcbRegs.ADCSOCFRC1.bit.SOC2 = 1;
+//	AdcbRegs.ADCSOCFRC1.bit.SOC3 = 1;
 	// perform PID on all outputs
-	size_t i;
-	long pout, dout, iout;
-	for (i = 0; i < NUM_OUTPUTS; i++) {
-		// Calculate error
-		errors[i] = AdcaResultRegs.ADCRESULT1 - AdcaResultRegs.ADCRESULT0;
-		integrals[i] += errors[i] * DT;
-		derivatives[i] = (errors[i] - previous_errors[i]) / DT;
+	int pout, dout, iout;
+	// Calculate error
+	errors[0] = AdcaResultRegs.ADCRESULT1 - AdcaResultRegs.ADCRESULT0;
 
-		// Scale outputs with ADC inputted constants
-		pout = (long) errors[i] * AdcaResultRegs.ADCRESULT2 / ADC_SCALE_FACTOR;
-		dout = (long) derivatives[i] * AdcaResultRegs.ADCRESULT3 / ADC_SCALE_FACTOR;
-		iout = (long) integrals[i] * AdcbResultRegs.ADCRESULT1 / ADC_SCALE_FACTOR;
-		previous_errors[i] = errors[i];
+	integrals[0] += errors[0] * DT;
+	derivatives[0] = (errors[0] - previous_errors[0]) / DT;
+	// printf("%d %d\n", derivatives[0], AdcaResultRegs.ADCRESULT2);
+
+	// Scale outputs with ADC inputted constants
+	pout = errors[0] / ADC_SCALE_FACTOR * (AdcaResultRegs.ADCRESULT3 / ADC_SCALE_FACTOR);
+	iout = integrals[0] / ADC_SCALE_FACTOR * (AdcbResultRegs.ADCRESULT1 / ADC_SCALE_FACTOR);
+	dout = derivatives[0] / ADC_SCALE_FACTOR * (AdcaResultRegs.ADCRESULT2 / ADC_SCALE_FACTOR);
+	previous_errors[0] = errors[0];
+	// printf("%d %d %d\n", AdcaResultRegs.ADCRESULT3, AdcbResultRegs.ADCRESULT1, AdcaResultRegs.ADCRESULT2);
+	// printf("%d %d %d\n", pout, iout, dout);
+
+	DacaRegs.DACVALS.bit.DACVALS = DAC_OFFSET_VALUE;
+	DaccRegs.DACVALS.bit.DACVALS = MAX(MIN(DAC_OFFSET_VALUE + errors[0], DAC_MAX_VALUE - 1), 0);
+
+	char pid_out = GPIO_ReadPin(PID_OUTPUT_GPIO_PIN);
+
+	if (pid_out) {
+		previous_outputs[0] = MAX(MIN(DAC_OFFSET_VALUE + pout + iout + dout, DAC_MAX_VALUE - 1), 0);
 	}
 
-	// output on the DACs if the hold signal is off
-	if (GPIO_ReadPin(HOLD_OUTPUT_GPIO_PIN) == 0) {
-		DacaRegs.DACVALS.bit.DACVALS = DAC_OFFSET_VALUE;
-		DacbRegs.DACVALS.bit.DACVALS = MIN(DAC_OFFSET_VALUE + pout + dout + iout, DAC_MAX_VALUE - 1);
-		DaccRegs.DACVALS.bit.DACVALS = MIN(DAC_OFFSET_VALUE + errors[i], DAC_MAX_VALUE - 1);
-	}
+	// output PID signal on the DACs if the PID signal is on
+	DacbRegs.DACVALS.bit.DACVALS = (pid_out || !GPIO_ReadPin(MANUAL_SET_OUTPUT_GPIO_PIN)) ? previous_outputs[0] : AdcbResultRegs.ADCRESULT4;
 
 	// turn on LED if locked
-	GPIO_WritePin(LED_GPIO_PIN, errors[0] < LED_THRESHOLD);
+	GPIO_WritePin(LED_GREEN_GPIO_PIN, errors[0] < LED_THRESHOLD);
+	GPIO_WritePin(LED_RED_GPIO_PIN, errors[0] > LED_THRESHOLD);
+
 }
 
 int main(void)
@@ -213,11 +241,7 @@ int main(void)
 	InitSysCtrl();
 
 	// initialize GPIO
-	InitGpio();
-	GPIO_SetupPinMux(HOLD_OUTPUT_GPIO_PIN, GPIO_MUX_CPU1, 0);
-	GPIO_SetupPinMux(LED_GPIO_PIN, GPIO_MUX_CPU1, 0);
-	GPIO_SetupPinOptions(HOLD_OUTPUT_GPIO_PIN, GPIO_INPUT, GPIO_PULLUP);
-	GPIO_SetupPinOptions(LED_GPIO_PIN, GPIO_OUTPUT, GPIO_PUSHPULL);
+	setup_gpio();
 
 	// disallow CPU interrupts
 	DINT;
@@ -267,6 +291,6 @@ int main(void)
         pid_loop();
 
 		// delay for a time DT
-		DELAY_US(DT);
+		// DELAY_US(DT);
 	}
 }
