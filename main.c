@@ -3,10 +3,11 @@
 
 // define macros
 #define ACQPS_SETTING 9u
-#define ADC_SCALE_FACTOR 45
+#define ADC_SCALE_FACTOR 40
 #define ADC_WARMUP_TIME 1000
-#define DAC_MAX_VALUE 4096
-#define DAC_OFFSET_VALUE 2048
+#define ADC_MAX_VALUE 3200
+#define DAC_MAX_VALUE 2343 // 4096
+#define DAC_OFFSET_VALUE 1171 // 2048
 #define DAC_WARMUP_TIME 10
 #define DT 1.0
 #define KP 1.0
@@ -14,13 +15,15 @@
 #define KD 0.0
 #define MIN(X, Y) (((X) < (Y)) ? (X) : (Y))
 #define MAX(X, Y) (((X) > (Y)) ? (X) : (Y))
+#define SGN(X) ((X > 0) ? 1 : ((X < 0) ? -1 : 0))
+#define MAXVAL 32767
 #define NUM_INPUTS_PER_OUTPUT 2
 #define NUM_OUTPUTS 1
 #define PID_OUTPUT_GPIO_PIN 89
 #define MANUAL_SET_OUTPUT_GPIO_PIN 90
 #define LED_GREEN_GPIO_PIN 65
 #define LED_RED_GPIO_PIN 69
-#define LED_THRESHOLD 205
+#define LED_THRESHOLD 20
 
 // declare PID arrays
 int16 errors[NUM_OUTPUTS];
@@ -198,7 +201,7 @@ void pid_loop(void)
 	AdcaRegs.ADCSOCFRC1.bit.SOC3 = 1;
 //	AdcbRegs.ADCSOCFRC1.bit.SOC0 = 1;
 	AdcbRegs.ADCSOCFRC1.bit.SOC1 = 1;
-//	AdcbRegs.ADCSOCFRC1.bit.SOC2 = 1;
+	AdcbRegs.ADCSOCFRC1.bit.SOC2 = 1;
 //	AdcbRegs.ADCSOCFRC1.bit.SOC3 = 1;
 	// perform PID on all outputs
 	int pout, dout, iout;
@@ -209,13 +212,20 @@ void pid_loop(void)
 	derivatives[0] = (errors[0] - previous_errors[0]) / DT;
 	// printf("%d %d\n", derivatives[0], AdcaResultRegs.ADCRESULT2);
 
-	// Scale outputs with ADC inputted constants
+	// Scale outputs with ADC inputed constants
 	pout = errors[0] / ADC_SCALE_FACTOR * (AdcaResultRegs.ADCRESULT3 / ADC_SCALE_FACTOR);
-	iout = integrals[0] / ADC_SCALE_FACTOR * (AdcbResultRegs.ADCRESULT1 / ADC_SCALE_FACTOR);
-	dout = derivatives[0] / ADC_SCALE_FACTOR * (AdcaResultRegs.ADCRESULT2 / ADC_SCALE_FACTOR);
+	dout = derivatives[0] * (AdcaResultRegs.ADCRESULT2 / ADC_SCALE_FACTOR);
+
+	// to calculate integrals you need special code to ensure that out of bounds are handled correctly.
+	int ifac = integrals[0] / ADC_SCALE_FACTOR;
+	int ki = AdcbResultRegs.ADCRESULT1 / ADC_SCALE_FACTOR;
+	iout = (ki == 0 || SGN(ifac * ki) == SGN(ifac)) ? (ifac * ki) : (MAXVAL * SGN(ifac));
+	// printf("%d %d %d %d\n", ifac, ki, ifac * ki, iout);
+
 	previous_errors[0] = errors[0];
-	// printf("%d %d %d\n", AdcaResultRegs.ADCRESULT3, AdcbResultRegs.ADCRESULT1, AdcaResultRegs.ADCRESULT2);
-	// printf("%d %d %d\n", pout, iout, dout);
+	//printf("%d %d %d\n", AdcaResultRegs.ADCRESULT3, AdcbResultRegs.ADCRESULT1, AdcaResultRegs.ADCRESULT2);
+	//printf("%d %d %d\n", pout, iout, dout);
+	int sumout = pout + iout + dout;
 
 	DacaRegs.DACVALS.bit.DACVALS = DAC_OFFSET_VALUE;
 	DaccRegs.DACVALS.bit.DACVALS = MAX(MIN(DAC_OFFSET_VALUE + errors[0], DAC_MAX_VALUE - 1), 0);
@@ -223,15 +233,17 @@ void pid_loop(void)
 	char pid_out = GPIO_ReadPin(PID_OUTPUT_GPIO_PIN);
 
 	if (pid_out) {
-		previous_outputs[0] = MAX(MIN(DAC_OFFSET_VALUE + pout + iout + dout, DAC_MAX_VALUE - 1), 0);
+		previous_outputs[0] = MAX(MIN(DAC_OFFSET_VALUE + sumout, DAC_MAX_VALUE - 1), 0);
+		//printf("Out: %d\n", previous_outputs[0]);
 	}
 
 	// output PID signal on the DACs if the PID signal is on
-	DacbRegs.DACVALS.bit.DACVALS = (pid_out || !GPIO_ReadPin(MANUAL_SET_OUTPUT_GPIO_PIN)) ? previous_outputs[0] : AdcbResultRegs.ADCRESULT4;
+	DacbRegs.DACVALS.bit.DACVALS = (pid_out || !GPIO_ReadPin(MANUAL_SET_OUTPUT_GPIO_PIN)) ? previous_outputs[0] : (AdcbResultRegs.ADCRESULT2 * 3 / 4);
 
 	// turn on LED if locked
-	GPIO_WritePin(LED_GREEN_GPIO_PIN, errors[0] < LED_THRESHOLD);
-	GPIO_WritePin(LED_RED_GPIO_PIN, errors[0] > LED_THRESHOLD);
+	char locked = (errors[0] < 0 ? -errors[0] : errors[0]) < LED_THRESHOLD;
+	GPIO_WritePin(LED_GREEN_GPIO_PIN, locked);
+	GPIO_WritePin(LED_RED_GPIO_PIN, !locked);
 
 }
 
@@ -291,6 +303,6 @@ int main(void)
         pid_loop();
 
 		// delay for a time DT
-		// DELAY_US(DT);
+		DELAY_US(DT);
 	}
 }
